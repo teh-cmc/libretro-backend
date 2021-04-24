@@ -3,13 +3,16 @@ pub extern crate libc;
 #[doc(hidden)]
 pub extern crate libretro_sys;
 
+use libretro_sys::{
+    AudioSampleBatchFn, AudioSampleFn, EnvironmentFn, InputPollFn, InputStateFn, SystemAvInfo,
+    VideoRefreshFn,
+};
+pub use libretro_sys::{PixelFormat, Region};
 use std::{
     cmp::max,
     ffi::{CStr, CString},
     mem, ptr, slice,
 };
-
-pub use libretro_sys::{PixelFormat, Region};
 
 pub struct CoreInfo {
     library_name: CString,
@@ -31,7 +34,7 @@ impl CoreInfo {
     }
 
     pub fn supports_roms_with_extension(mut self, mut extension: &str) -> Self {
-        if extension.starts_with(".") {
+        if extension.starts_with('.') {
             extension = &extension[1..];
         }
 
@@ -39,8 +42,8 @@ impl CoreInfo {
         mem::swap(&mut string, &mut self.supported_romfile_extensions);
 
         let mut vec = string.into_bytes();
-        if vec.is_empty() == false {
-            vec.push('|' as u8);
+        if !vec.is_empty() {
+            vec.push(b'|');
         }
 
         vec.extend_from_slice(extension.as_bytes());
@@ -137,6 +140,11 @@ impl AudioVideoInfo {
         })
     }
 }
+impl Default for AudioVideoInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct GameData {
     path: Option<String>,
@@ -208,33 +216,21 @@ pub trait Core: Default {
     }
 }
 
-static mut ENVIRONMENT_CALLBACK: Option<libretro_sys::EnvironmentFn> = None;
+static mut ENVIRONMENT_CALLBACK: Option<EnvironmentFn> = None;
 
 #[doc(hidden)]
 pub struct Retro<B: Core> {
-    video_refresh_callback: Option<libretro_sys::VideoRefreshFn>,
-    audio_sample_callback: Option<libretro_sys::AudioSampleFn>,
-    audio_sample_batch_callback: Option<libretro_sys::AudioSampleBatchFn>,
-    input_poll_callback: Option<libretro_sys::InputPollFn>,
-    input_state_callback: Option<libretro_sys::InputStateFn>,
+    video_refresh_callback: Option<VideoRefreshFn>,
+    audio_sample_callback: Option<AudioSampleFn>,
+    audio_sample_batch_callback: Option<AudioSampleBatchFn>,
+    input_poll_callback: Option<InputPollFn>,
+    input_state_callback: Option<InputStateFn>,
 
     core: B,
 
     is_game_loaded: bool,
     av_info: AudioVideoInfo,
     total_audio_samples_uploaded: usize,
-}
-
-macro_rules! set_callback {
-    ($output: expr, $input: expr) => {
-        unsafe {
-            if $input == mem::transmute(0 as usize) {
-                $output = None;
-            } else {
-                $output = Some($input);
-            }
-        }
-    };
 }
 
 impl<B: Core> Retro<B> {
@@ -246,7 +242,7 @@ impl<B: Core> Retro<B> {
             input_poll_callback: None,
             input_state_callback: None,
 
-            core: core,
+            core,
 
             is_game_loaded: false,
             av_info: AudioVideoInfo::new(),
@@ -254,7 +250,6 @@ impl<B: Core> Retro<B> {
         }
     }
 
-    #[must_use]
     unsafe fn call_environment<T>(&mut self, command: libc::c_uint, pointer: &T) -> Result<(), ()> {
         let ok = ENVIRONMENT_CALLBACK.unwrap()(command, mem::transmute(pointer));
         if ok {
@@ -282,34 +277,34 @@ impl<B: Core> Retro<B> {
         info.library_version = core_info.library_version.as_ptr();
         info.valid_extensions = core_info.supported_romfile_extensions.as_ptr();
         info.need_fullpath = core_info.require_path_when_loading_roms;
-        info.block_extract = core_info.allow_frontend_to_extract_archives == false;
+        info.block_extract = !core_info.allow_frontend_to_extract_archives;
     }
 
-    pub fn on_set_environment(callback: libretro_sys::EnvironmentFn) {
-        set_callback!(ENVIRONMENT_CALLBACK, callback);
+    pub fn on_set_environment(callback: impl Into<Option<EnvironmentFn>>) {
+        unsafe { ENVIRONMENT_CALLBACK = callback.into() }
     }
 
-    pub fn on_set_video_refresh(&mut self, callback: libretro_sys::VideoRefreshFn) {
-        set_callback!(self.video_refresh_callback, callback);
+    pub fn on_set_video_refresh(&mut self, callback: impl Into<Option<VideoRefreshFn>>) {
+        self.video_refresh_callback = callback.into();
     }
 
-    pub fn on_set_audio_sample(&mut self, callback: libretro_sys::AudioSampleFn) {
-        set_callback!(self.audio_sample_callback, callback);
+    pub fn on_set_audio_sample(&mut self, callback: impl Into<Option<AudioSampleFn>>) {
+        self.audio_sample_callback = callback.into();
     }
 
-    pub fn on_set_audio_sample_batch(&mut self, callback: libretro_sys::AudioSampleBatchFn) {
-        set_callback!(self.audio_sample_batch_callback, callback);
+    pub fn on_set_audio_sample_batch(&mut self, callback: impl Into<Option<AudioSampleBatchFn>>) {
+        self.audio_sample_batch_callback = callback.into();
     }
 
-    pub fn on_set_input_poll(&mut self, callback: libretro_sys::InputPollFn) {
-        set_callback!(self.input_poll_callback, callback);
+    pub fn on_set_input_poll(&mut self, callback: impl Into<Option<InputPollFn>>) {
+        self.input_poll_callback = callback.into();
     }
 
-    pub fn on_set_input_state(&mut self, callback: libretro_sys::InputStateFn) {
-        set_callback!(self.input_state_callback, callback);
+    pub fn on_set_input_state(&mut self, callback: impl Into<Option<InputStateFn>>) {
+        self.input_state_callback = callback.into();
     }
 
-    pub fn on_get_system_av_info(&mut self, info: *mut libretro_sys::SystemAvInfo) {
+    pub fn on_get_system_av_info(&mut self, info: *mut SystemAvInfo) {
         assert_ne!(info, ptr::null_mut());
         let info = unsafe { &mut *info };
 
@@ -331,7 +326,7 @@ impl<B: Core> Retro<B> {
     pub fn on_load_game(&mut self, game_info: *const libretro_sys::GameInfo) -> bool {
         assert_eq!(self.is_game_loaded, false);
 
-        let game_info = if game_info == ptr::null() {
+        let game_info = if game_info.is_null() {
             None
         } else {
             Some(unsafe { &*game_info })
@@ -339,7 +334,7 @@ impl<B: Core> Retro<B> {
 
         let game_data = match game_info {
             Some(game_info) => {
-                let path = if game_info.path == ptr::null() {
+                let path = if game_info.path.is_null() {
                     None
                 } else {
                     unsafe {
@@ -350,7 +345,7 @@ impl<B: Core> Retro<B> {
                     }
                 };
 
-                let data = if game_info.data == ptr::null() && game_info.size == 0 {
+                let data = if game_info.data.is_null() && game_info.size == 0 {
                     None
                 } else {
                     unsafe {
@@ -361,10 +356,7 @@ impl<B: Core> Retro<B> {
                     }
                 };
 
-                GameData {
-                    path: path,
-                    data: data,
-                }
+                GameData { path, data }
             }
             None => GameData {
                 path: None,
@@ -460,7 +452,7 @@ impl<B: Core> Retro<B> {
     }
 
     pub fn on_unload_game(&mut self) {
-        if self.is_game_loaded == false {
+        if !self.is_game_loaded {
             return;
         }
 
@@ -495,9 +487,9 @@ impl<B: Core> Retro<B> {
 }
 
 pub struct RuntimeHandle {
-    video_refresh_callback: libretro_sys::VideoRefreshFn,
-    input_state_callback: libretro_sys::InputStateFn,
-    audio_sample_batch_callback: libretro_sys::AudioSampleBatchFn,
+    video_refresh_callback: VideoRefreshFn,
+    input_state_callback: InputStateFn,
+    audio_sample_batch_callback: AudioSampleBatchFn,
     upload_video_frame_already_called: bool,
     audio_samples_uploaded: usize,
 
@@ -509,7 +501,7 @@ pub struct RuntimeHandle {
 impl RuntimeHandle {
     pub fn upload_video_frame(&mut self, data: &[u8]) {
         assert!(
-            self.upload_video_frame_already_called == false,
+            !self.upload_video_frame_already_called,
             "You can only call upload_video_frame() once per frame!"
         );
         assert!(
@@ -560,7 +552,7 @@ impl RuntimeHandle {
         unsafe {
             let value =
                 (self.input_state_callback)(port, libretro_sys::DEVICE_JOYPAD, 0, device_id);
-            return value == 1;
+            value == 1
         }
     }
 }
