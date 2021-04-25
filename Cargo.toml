@@ -11,11 +11,14 @@ Idiomatic Rust API bindings to the libretro API
 """
 
 [dependencies]
-"libc" = "0.2"
-"libretro-sys" = "0.1"
+libc = "0.2"
+libretro-sys = "=0.1"
 
 [profile.dev]
 panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[patch.crates-io]
+libretro-sys = { git = "https://github.com/teh-cmc/libretro-sys.git", branch = "cmc/custom" }

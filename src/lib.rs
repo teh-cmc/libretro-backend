@@ -4,8 +4,10 @@ pub extern crate libc;
 pub extern crate libretro_sys;
 
 use libretro_sys::{
-    AudioSampleBatchFn, AudioSampleFn, EnvironmentFn, InputPollFn, InputStateFn, SystemAvInfo,
-    VideoRefreshFn,
+    AudioSampleBatchFn, AudioSampleFn, EnvironmentFn, InputPollFn, InputStateFn,
+    RetroCoreOptionDefinition, RetroCoreOptionValue, SystemAvInfo, Variable, VideoRefreshFn,
+    ENVIRONMENT_GET_VARIABLE, ENVIRONMENT_GET_VARIABLE_UPDATE, RETRO_ENVIRONMENT_SET_CORE_OPTIONS,
+    RETRO_NUM_CORE_OPTION_VALUES_MAX,
 };
 pub use libretro_sys::{PixelFormat, Region};
 use std::{
@@ -196,8 +198,92 @@ pub enum JoypadButton {
     R3,
 }
 
+#[derive(Debug)]
+pub struct CoreOptionValue {
+    pub value: CString,
+    pub label: Option<CString>,
+}
+
+impl From<(&str, Option<&str>)> for CoreOptionValue {
+    fn from((value, label): (&str, Option<&str>)) -> Self {
+        Self {
+            value: CString::new(value).unwrap(),
+            label: label.map(|label| CString::new(label).unwrap()),
+        }
+    }
+}
+impl From<&CoreOptionValue> for RetroCoreOptionValue {
+    fn from(val: &CoreOptionValue) -> Self {
+        RetroCoreOptionValue {
+            value: val.value.as_ptr(),
+            label: val
+                .label
+                .as_ref()
+                .map_or(std::ptr::null(), |label| label.as_ptr()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CoreOptionDefinition {
+    pub name: CString,
+    pub desc: CString,
+    pub info: Option<CString>,
+    /// First value will implicitly be treated as default one.
+    pub opts: Vec<CoreOptionValue>,
+}
+impl CoreOptionDefinition {
+    pub fn new(name: &str, desc: &str, info: Option<&str>, opts: Vec<CoreOptionValue>) -> Self {
+        Self {
+            name: CString::new(name).unwrap(),
+            desc: CString::new(desc).unwrap(),
+            info: info.map(|info| CString::new(info).unwrap()),
+            opts,
+        }
+    }
+}
+impl From<&CoreOptionDefinition> for RetroCoreOptionDefinition {
+    fn from(val: &CoreOptionDefinition) -> Self {
+        let values = {
+            let mut values = [RetroCoreOptionValue::default(); RETRO_NUM_CORE_OPTION_VALUES_MAX];
+            for (i, value) in val.opts.iter().enumerate() {
+                values[i] = value.into();
+            }
+            values
+        };
+        RetroCoreOptionDefinition {
+            key: val.name.as_ptr(),
+            desc: val.desc.as_ptr(),
+            info: val
+                .info
+                .as_ref()
+                .map_or(std::ptr::null(), |info| info.as_ptr()),
+            default_value: values[0].value,
+            values,
+        }
+    }
+}
+
+pub struct CoreOptionDefinitions(Vec<CoreOptionDefinition>);
+impl From<CoreOptionDefinitions> for Vec<RetroCoreOptionDefinition> {
+    fn from(val: CoreOptionDefinitions) -> Self {
+        let mut opts: Vec<RetroCoreOptionDefinition> = val.0.iter().map(Into::into).collect();
+        opts.push(RetroCoreOptionDefinition::default());
+        opts
+    }
+}
+impl CoreOptionDefinitions {
+    pub fn new(opts: Vec<CoreOptionDefinition>) -> Self {
+        Self(opts)
+    }
+}
+
 pub trait Core: Default {
     fn info() -> CoreInfo;
+    fn options(&self) -> &[CoreOptionDefinition] {
+        &[]
+    }
+    fn on_options_updated(&mut self, _vars: Vec<(&str, &str)>) {}
     fn on_load_game(&mut self, game_data: GameData) -> LoadGameResult;
     fn on_unload_game(&mut self) -> GameData;
     fn on_run(&mut self, handle: &mut RuntimeHandle);
@@ -257,6 +343,10 @@ impl<B: Core> Retro<B> {
         } else {
             Err(())
         }
+    }
+
+    pub fn on_retro_init(&mut self) {
+        self.set_core_options();
     }
 
     pub fn on_get_system_info(info: *mut libretro_sys::SystemInfo) {
@@ -326,6 +416,8 @@ impl<B: Core> Retro<B> {
     pub fn on_load_game(&mut self, game_info: *const libretro_sys::GameInfo) -> bool {
         assert_eq!(self.is_game_loaded, false);
 
+        self.get_core_options(true);
+
         let game_info = if game_info.is_null() {
             None
         } else {
@@ -393,7 +485,59 @@ impl<B: Core> Retro<B> {
         false
     }
 
+    fn set_core_options(&mut self) {
+        let core_opts = self.core.options();
+        let mut data: Vec<RetroCoreOptionDefinition> = core_opts.iter().map(Into::into).collect();
+        data.push(RetroCoreOptionDefinition::default());
+
+        unsafe {
+            let env_fn = ENVIRONMENT_CALLBACK.unwrap();
+            assert!(env_fn(
+                RETRO_ENVIRONMENT_SET_CORE_OPTIONS,
+                data.as_ptr() as *mut _,
+            ));
+        }
+    }
+
+    fn get_core_options(&mut self, force: bool) {
+        unsafe {
+            let env_fn = ENVIRONMENT_CALLBACK.unwrap();
+            let mut updated = false;
+            assert!(env_fn(
+                ENVIRONMENT_GET_VARIABLE_UPDATE,
+                &mut updated as *mut _ as _
+            ));
+            if force || updated {
+                let updates: Vec<_> = self
+                    .core
+                    .options()
+                    .iter()
+                    .map(|def| {
+                        let mut var = Variable {
+                            key: def.name.as_ptr(),
+                            ..Default::default()
+                        };
+
+                        assert!(env_fn(ENVIRONMENT_GET_VARIABLE, &mut var as *mut _ as _));
+
+                        let k = CStr::from_ptr(var.key).to_string_lossy();
+                        let v = CStr::from_ptr(var.value).to_string_lossy();
+                        (k, v)
+                    })
+                    .collect();
+                self.core.on_options_updated(
+                    updates
+                        .iter()
+                        .map(|(k, v)| (k.as_ref(), v.as_ref()))
+                        .collect(),
+                );
+            }
+        }
+    }
+
     pub fn on_run(&mut self) {
+        self.get_core_options(false);
+
         let mut handle = RuntimeHandle {
             video_refresh_callback: self.video_refresh_callback.unwrap(),
             input_state_callback: self.input_state_callback.unwrap(),
@@ -580,6 +724,7 @@ macro_rules! libretro_core {
             assert_eq!(LIBRETRO_INSTANCE, 0 as *mut _);
             let retro = $crate::construct::<$core>();
             LIBRETRO_INSTANCE = Box::into_raw(Box::new(retro));
+            (&mut *LIBRETRO_INSTANCE).on_retro_init()
         }
 
         #[doc(hidden)]
@@ -644,7 +789,9 @@ macro_rules! libretro_core {
 
         #[doc(hidden)]
         #[no_mangle]
-        pub extern "C" fn retro_get_system_info(info: *mut $crate::libretro_sys::SystemInfo) {
+        pub unsafe extern "C" fn retro_get_system_info(
+            info: *mut $crate::libretro_sys::SystemInfo,
+        ) {
             $crate::Retro::<$core>::on_get_system_info(info)
         }
 
