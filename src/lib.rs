@@ -283,11 +283,23 @@ pub trait Core: Default {
     fn options(&self) -> &[CoreOptionDefinition] {
         &[]
     }
+
+    fn on_serialize_size(&self) -> usize {
+        0
+    }
+    fn on_serialize(&self, _data: &mut [u8]) -> bool {
+        false
+    }
+    fn on_unserialize(&mut self, _data: &[u8]) -> bool {
+        false
+    }
+
     fn on_options_updated(&mut self, _vars: Vec<(&str, &str)>) {}
     fn on_load_game(&mut self, game_data: GameData) -> LoadGameResult;
     fn on_unload_game(&mut self) -> GameData;
     fn on_run(&mut self, handle: &mut RuntimeHandle);
     fn on_reset(&mut self);
+
     fn save_memory(&mut self) -> Option<&mut [u8]> {
         None
     }
@@ -574,15 +586,17 @@ impl<B: Core> Retro<B> {
     }
 
     pub fn on_serialize_size(&mut self) -> libc::size_t {
-        0
+        self.core.on_serialize_size() as _
     }
 
-    pub fn on_serialize(&mut self, _data: *mut libc::c_void, _size: libc::size_t) -> bool {
-        false
+    pub fn on_serialize(&mut self, data: *mut libc::c_void, len: libc::size_t) -> bool {
+        let data = unsafe { std::slice::from_raw_parts_mut(data as _, len) };
+        self.core.on_serialize(data)
     }
 
-    pub fn on_unserialize(&mut self, _data: *const libc::c_void, _size: libc::size_t) -> bool {
-        false
+    pub fn on_unserialize(&mut self, data: *const libc::c_void, len: libc::size_t) -> bool {
+        let data = unsafe { std::slice::from_raw_parts(data as _, len) };
+        self.core.on_unserialize(data)
     }
 
     pub fn on_cheat_reset(&mut self) {}
